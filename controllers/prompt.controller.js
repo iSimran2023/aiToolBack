@@ -1,68 +1,61 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Prompt } from "../model/prompt.model.js";
+import { nanoid } from 'nanoid';
+
 
 const genAI = new GoogleGenerativeAI(process.env.NEW_GEMINI_KEY);
 const model = genAI.getGenerativeModel({
   model: "gemini-2.5-flash",
 });
 
-// Store active chats in memory (or use Redis in production)
+// Store active chats in memory
 const activeChats = new Map();
 
 export const sendPrompt = async (req, res) => {
   const { content, chatId } = req.body;
   const userId = req.userId;
 
-  if (!content || content.trim() === "") {
+  if (!content?.trim()) {
     return res.status(400).json({ error: "Content is required" });
   }
 
   try {
-    let currentChatId = chatId;
-    
-    // If no chatId provided or chatId doesn't exist, create new chat session
-    if (!currentChatId || !activeChats.has(`${userId}-${currentChatId}`)) {
-      currentChatId = Date.now().toString(); // Simple timestamp as chatId
-      activeChats.set(`${userId}-${currentChatId}`, {
-        userId,
-        chatId: currentChatId,
-        lastActivity: Date.now()
-      });
-    }
+    const currentChatId = chatId || nanoid(12);
 
-    // Save user prompt
     await Prompt.create({
       userId,
+      chatId: currentChatId,
       role: "user",
-      content,
+      content: content.trim(),
     });
 
-    // Generate AI response
-    const result = await model.generateContent(content);
-    const aiContent = result.response.text();
+    //  Wrap AI call in try-catch
+    let aiContent = "Sorry, I couldn't generate a response.";
+    try {
+      const result = await model.generateContent(content);
+      aiContent = result.response.text();
+    } catch (aiError) {
+      console.error("Gemini API error:", aiError);
+      aiContent = "AI service is temporarily unavailable. Please try again later.";
+    }
 
-    // Save AI response
     await Prompt.create({
       userId,
+      chatId: currentChatId,
       role: "assistant",
       content: aiContent,
     });
 
-    // Update last activity
-    activeChats.set(`${userId}-${currentChatId}`, {
-      ...activeChats.get(`${userId}-${currentChatId}`),
-      lastActivity: Date.now()
-    });
-
     return res.status(200).json({ 
       reply: aiContent,
-      chatId: currentChatId // Return chatId to frontend
+      chatId: currentChatId
     });
 
   } catch (error) {
-    console.error("Error in Prompt:", error);
+    console.error("Unexpected error in sendPrompt:", error); // ← logs full error
     return res.status(500).json({
       error: "Something went wrong while generating the AI response",
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };

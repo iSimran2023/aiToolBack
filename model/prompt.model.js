@@ -6,6 +6,11 @@ const promptSchema = new mongoose.Schema({
     ref: "User",
     required: true,
   },
+  chatId: { 
+    type: String, 
+    required: true,
+    // index: true // ← critical for performance
+  },
   role: {
     type: String,
     enum: ["user", "assistant"],
@@ -20,5 +25,7 @@ const promptSchema = new mongoose.Schema({
     default: Date.now,
   },
 });
+
+promptSchema.index({ chatId: 1 });
 
 export const Prompt = mongoose.model("Prompt", promptSchema);

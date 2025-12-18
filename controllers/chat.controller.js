@@ -1,45 +1,6 @@
 import { Prompt } from "../model/prompt.model.js";
 
-// Helper function to generate chatId from timestamp
-const generateChatIdFromTimestamp = (timestamp) => {
-  const date = new Date(timestamp);
-  const year = date.getFullYear();
-  const month = (date.getMonth() + 1).toString().padStart(2, '0');
-  const day = date.getDate().toString().padStart(2, '0');
-  const hour = date.getHours().toString().padStart(2, '0');
-  
-  return `${year}${month}${day}_${hour}`;
-};
-
-// Parse chatId to get date range
-const parseChatIdToDateRange = (chatId) => {
-  try {
-    const [datePart, hourPart] = chatId.split('_');
-    
-    if (!datePart || !hourPart) {
-      throw new Error('Invalid chatId format');
-    }
-    
-    const year = parseInt(datePart.substring(0, 4));
-    const month = parseInt(datePart.substring(4, 6)) - 1; // Month is 0-indexed
-    const day = parseInt(datePart.substring(6, 8));
-    const hour = parseInt(hourPart);
-    
-    const startTime = new Date(year, month, day, hour, 0, 0);
-    const endTime = new Date(year, month, day, hour + 1, 0, 0);
-    
-    return { startTime, endTime };
-  } catch (error) {
-    console.error("Error parsing chatId:", chatId, error);
-    // Fallback: return a default range if parsing fails
-    const now = new Date();
-    const startTime = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const endTime = new Date(startTime.getTime() + 24 * 60 * 60 * 1000);
-    return { startTime, endTime };
-  }
-};
-
-// Get all chats for user
+// Get all chats for user — grouped by chatId (not hour!)
 export const getUserChats = async (req, res) => {
   try {
     const userId = req.userId;
@@ -58,59 +19,45 @@ export const getUserChats = async (req, res) => {
       });
     }
     
-    // Group prompts by hour
+    // ✅ Group by chatId (stable, unique)
     const chatsMap = new Map();
     
     prompts.forEach(prompt => {
-      try {
-        const chatId = generateChatIdFromTimestamp(prompt.createdAt);
-        
-        if (!chatsMap.has(chatId)) {
-          chatsMap.set(chatId, {
-            id: chatId,
-            title: `Chat ${new Date(prompt.createdAt).toLocaleString('en-US', {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit'
-            })}`,
-            messages: [],
-            lastUpdated: prompt.createdAt,
-            messageCount: 0,
-            firstUserMessage: null
-          });
-        }
-        
-        const chat = chatsMap.get(chatId);
-        
-        // Store first user message for title
-        if (prompt.role === 'user' && !chat.firstUserMessage) {
-          chat.firstUserMessage = prompt.content;
-          // Set title from first user message (truncate if too long)
-          if (prompt.content.length > 0) {
-            const shortContent = prompt.content.length > 40 
-              ? prompt.content.substring(0, 40) + '...' 
-              : prompt.content;
-            chat.title = shortContent;
-          }
-        }
-        
-        chat.messages.push({
-          role: prompt.role,
-          content: prompt.content,
-          createdAt: prompt.createdAt
+      if (!chatsMap.has(prompt.chatId)) {
+        chatsMap.set(prompt.chatId, {
+          id: prompt.chatId,
+          title: "New Chat",
+          messages: [],
+          lastUpdated: prompt.createdAt,
+          messageCount: 0,
+          firstUserMessage: null
         });
-        
-        chat.messageCount++;
-        if (prompt.createdAt > chat.lastUpdated) {
-          chat.lastUpdated = prompt.createdAt;
-        }
-      } catch (error) {
-        console.error("Error processing prompt:", error);
+      }
+      
+      const chat = chatsMap.get(prompt.chatId);
+      
+      // Store first user message for title
+      if (prompt.role === 'user' && !chat.firstUserMessage) {
+        chat.firstUserMessage = prompt.content;
+        const shortTitle = prompt.content.length > 40 
+          ? prompt.content.substring(0, 40) + '...' 
+          : prompt.content;
+        chat.title = shortTitle;
+      }
+      
+      chat.messages.push({
+        role: prompt.role,
+        content: prompt.content,
+        createdAt: prompt.createdAt
+      });
+      
+      chat.messageCount++;
+      if (prompt.createdAt > chat.lastUpdated) {
+        chat.lastUpdated = prompt.createdAt;
       }
     });
     
-    // Convert map to array and sort by lastUpdated
+    // Convert map to array and sort by lastUpdated (newest first)
     const chats = Array.from(chatsMap.values())
       .sort((a, b) => new Date(b.lastUpdated) - new Date(a.lastUpdated));
     
@@ -130,13 +77,12 @@ export const getUserChats = async (req, res) => {
     console.error("Error in getUserChats:", error);
     res.status(500).json({ 
       success: false,
-      error: "Failed to fetch chats",
-      details: error.message 
+      error: "Failed to fetch chats"
     });
   }
 };
 
-// Get messages for a specific chat
+// Get messages for a specific chat — by chatId
 export const getChatMessages = async (req, res) => {
   try {
     const userId = req.userId;
@@ -144,17 +90,12 @@ export const getChatMessages = async (req, res) => {
     
     console.log("Fetching messages for chat:", chatId, "user:", userId);
     
-    const { startTime, endTime } = parseChatIdToDateRange(chatId);
-    
     const prompts = await Prompt.find({
       userId,
-      createdAt: { 
-        $gte: startTime, 
-        $lt: endTime 
-      }
+      chatId // ← exact match (fast, no date parsing)
     }).sort({ createdAt: 1 });
     
-    console.log("Found prompts in range:", prompts.length);
+    console.log("Found prompts in chat:", prompts.length);
     
     if (prompts.length === 0) {
       return res.status(404).json({ 
@@ -174,7 +115,7 @@ export const getChatMessages = async (req, res) => {
       ? (firstUserMessage.content.length > 40 
           ? firstUserMessage.content.substring(0, 40) + '...' 
           : firstUserMessage.content)
-      : `Chat ${startTime.toLocaleString()}`;
+      : "New Chat";
     
     res.status(200).json({
       success: true,
@@ -190,17 +131,14 @@ export const getChatMessages = async (req, res) => {
     console.error("Error in getChatMessages:", error);
     res.status(500).json({ 
       success: false,
-      error: "Failed to fetch chat messages",
-      details: error.message 
+      error: "Failed to fetch chat messages"
     });
   }
 };
 
-// Update chat title
+// Update chat title (still frontend-managed via localStorage)
 export const updateChatTitle = async (req, res) => {
   try {
-    const userId = req.userId;
-    const { chatId } = req.params;
     const { title } = req.body;
     
     if (!title || title.trim() === "") {
@@ -210,14 +148,13 @@ export const updateChatTitle = async (req, res) => {
       });
     }
     
-    // In this implementation, we're not storing titles in the database
-    // This would require adding a Chat model or storing titles separately
-    // For now, we'll just acknowledge the request
+    // Note: We’re not storing titles in DB — frontend uses localStorage.
+    // To store permanently, add `title` field to Prompt or create Chat model later.
     
     res.status(200).json({
       success: true,
-      message: "Title updated (frontend should store in localStorage)",
-      chatId,
+      message: "Title updated",
+      chatId: req.params.chatId,
       title: title.trim()
     });
     
@@ -225,26 +162,20 @@ export const updateChatTitle = async (req, res) => {
     console.error("Error in updateChatTitle:", error);
     res.status(500).json({ 
       success: false,
-      error: "Failed to update chat title",
-      details: error.message 
+      error: "Failed to update chat title"
     });
   }
 };
 
-// Delete chat (delete all prompts in that time range)
+// Delete chat — by chatId
 export const deleteChat = async (req, res) => {
   try {
     const userId = req.userId;
     const { chatId } = req.params;
     
-    const { startTime, endTime } = parseChatIdToDateRange(chatId);
-    
     const result = await Prompt.deleteMany({
       userId,
-      createdAt: { 
-        $gte: startTime, 
-        $lt: endTime 
-      }
+      chatId // ← exact, safe delete
     });
     
     console.log("Deleted prompts:", result.deletedCount);
@@ -259,8 +190,7 @@ export const deleteChat = async (req, res) => {
     console.error("Error in deleteChat:", error);
     res.status(500).json({ 
       success: false,
-      error: "Failed to delete chat",
-      details: error.message 
+      error: "Failed to delete chat"
     });
   }
 };
